@@ -1,0 +1,12 @@
+[package]
+name = "maelstrom-unique-ids"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1.81"
+clippy = "0.0.302"
+maelstrom-node = "0.1.6"
+rand = "0.9.0-alpha.1"
+uuid = { version = "1.10.0", features = ["v4"] }
+serde_json = "1.0.120"
