@@ -1,4 +1,4 @@
 [workspace]
-members = ["maelstrom-echo", "maelstrom-unique-ids"]
+members = ["maelstrom-broadcast", "maelstrom-echo", "maelstrom-unique-ids"]
 
 resolver = "2"
