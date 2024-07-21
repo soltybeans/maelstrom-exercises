@@ -12,7 +12,6 @@ pub(crate) fn main() -> Result<()> {
 
 async fn try_main() -> Result<()> {
     let handler = Arc::new(Handler { seen: Arc::new(Mutex::new(Vec::new())) });
-    //let mut seen = HashSet::new();
     Runtime::new().with_handler(handler).run().await.unwrap();
 
     Ok(())
@@ -37,9 +36,7 @@ impl Node for Handler {
 
 async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Runtime) -> Result<()> {
     let msg = req.body.extra.get("message").unwrap().as_number().unwrap().to_owned();
-    //let msg = msg.as_u64().unwrap();
     handler.seen.lock().await.push(Value::from(msg));
-    //handler.sender.send(msg).await.expect("Expected to store msg");
     let message_body = MessageBody::new()
         .and_msg_id(req.body.msg_id)
         .with_type("broadcast_ok");
