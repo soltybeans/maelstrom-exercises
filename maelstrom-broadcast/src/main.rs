@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use maelstrom::protocol::{Message, MessageBody};
 use maelstrom::{done, Node, Result, Runtime};
 use std::sync::Arc;
+use std::thread;
 use serde_json::{Value};
 use tokio::sync::Mutex;
 
@@ -37,6 +38,21 @@ impl Node for Handler {
 async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Runtime) -> Result<()> {
     let msg = req.body.extra.get("message").unwrap().as_number().unwrap().to_owned();
     handler.seen.lock().await.push(Value::from(msg));
+
+
+    //as this node receives a message - send to all neighbours!
+    // FIXME: This is doing it serially to all neighbours and even with 2 neighbours, we're dropping some messages
+    // FIXME: Need to make this guarantee delivery...
+    let mut iter_neighbours = runtime.neighbours();
+    while let Some(i) = iter_neighbours.next() {
+        thread::scope(|s| {
+            s.spawn(|| {
+                runtime.call_async(i, req.clone());
+            });
+        })
+    };
+
+
     let message_body = MessageBody::new()
         .and_msg_id(req.body.msg_id)
         .with_type("broadcast_ok");
@@ -47,7 +63,7 @@ async fn process_read_message(handler: &Handler, req: Message, runtime: Runtime)
     let mut message_body = MessageBody::new()
         .and_msg_id(req.body.msg_id)
         .with_type("read_ok");
-    message_body.extra.insert(String::from("messages"), serde_json::value::Value::Array(handler.seen.lock().await.clone()));
+    message_body.extra.insert(String::from("messages"), Value::Array(handler.seen.lock().await.clone()));
     runtime.reply(req, message_body).await
 }
 
