@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use maelstrom::protocol::{Message, MessageBody};
 use maelstrom::{done, Node, Result, Runtime};
 use std::sync::Arc;
-use std::thread;
 use serde_json::{Value};
 use tokio::sync::Mutex;
 
@@ -27,9 +26,18 @@ struct Handler {
 impl Node for Handler {
     async fn process(&self, runtime: Runtime, req: Message) -> Result<()> {
         match req.get_type() {
-            "broadcast" => Ok(process_broadcast_message(&self, req, runtime).await.unwrap()),
-            "read" => Ok(process_read_message(&self, req, runtime).await.unwrap()),
-            "topology" => Ok(process_topology_message(req, runtime).await.unwrap()),
+            "broadcast" => {
+                process_broadcast_message(&self, req, runtime).await.unwrap();
+                Ok(())
+            },
+            "read" => {
+                process_read_message(&self, req, runtime).await.unwrap();
+                Ok(())
+            },
+            "topology" => {
+                process_topology_message(req, runtime).await.unwrap();
+                Ok(())
+            }
             _ => return done(runtime, req)
         }
     }
@@ -39,24 +47,27 @@ async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Run
     let msg = req.body.extra.get("message").unwrap().as_number().unwrap().to_owned();
     handler.seen.lock().await.push(Value::from(msg));
 
+    let runtime = Arc::new(runtime);
+    // Works because of smart pointers.
+    let iter_neighbours = runtime.neighbours();
 
-    //as this node receives a message - send to all neighbours!
-    // FIXME: This is doing it serially to all neighbours and even with 2 neighbours, we're dropping some messages
-    // FIXME: Need to make this guarantee delivery...
-    let mut iter_neighbours = runtime.neighbours();
-    while let Some(i) = iter_neighbours.next() {
-        thread::scope(|s| {
-            s.spawn(|| {
-                runtime.call_async(i, req.clone());
-            });
-        })
-    };
+    // Copy the request once
+    let request_for_reply: Message = Message { src: req.src.clone(), dest: req.dest.clone(), body: req.body.clone() };
+    let req2 = Arc::new(req);
+
+    for i in iter_neighbours {
+        let r = Arc::clone(&req2);
+
+        let runtime_for_peer = Arc::clone(&runtime);
+        // We can use one thread but interleave tasks while we're here to guarantee delivery to members
+        // tokio::spawn is more expensive and requires cross-thread lifetimes ('static) but only necessary if we need parallelism.
+        tokio::join!(async move {
+            runtime_for_peer.call_async(i, r.body.raw());
+        });
+    }
 
 
-    let message_body = MessageBody::new()
-        .and_msg_id(req.body.msg_id)
-        .with_type("broadcast_ok");
-    runtime.reply(req, message_body).await
+    runtime.reply(request_for_reply, MessageBody::new().and_msg_id(req2.body.msg_id).with_type("broadcast_ok")).await
 }
 
 async fn process_read_message(handler: &Handler, req: Message, runtime: Runtime) -> Result<()> {
