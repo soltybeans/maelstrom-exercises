@@ -353,6 +353,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "maelstrom-broadcast-3c"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "crossbeam-channel",
+ "crossbeam-utils",
+ "maelstrom-node",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "maelstrom-echo"
 version = "0.1.0"
 dependencies = [

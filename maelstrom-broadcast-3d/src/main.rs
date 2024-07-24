@@ -1,4 +1,4 @@
-// cargo build && ~/maelstrom.tar/maelstrom/maelstrom test -w broadcast --bin ./target/debug/maelstrom-broadcast --node-count 1 --time-limit 20 --rate 10
+// cargo build && ~/maelstrom.tar/maelstrom/maelstrom test -w broadcast --bin ./target/debug/maelstrom-broadcast-3d --node-count 1 --time-limit 20 --rate 10
 use async_trait::async_trait;
 use maelstrom::protocol::{Message, MessageBody};
 use maelstrom::{done, Node, Result, Runtime};
@@ -29,11 +29,11 @@ impl Node for Handler {
             "broadcast" => {
                 process_broadcast_message(&self, req, runtime).await.unwrap();
                 Ok(())
-            },
+            }
             "read" => {
                 process_read_message(&self, req, runtime).await.unwrap();
                 Ok(())
-            },
+            }
             "topology" => {
                 process_topology_message(req, runtime).await.unwrap();
                 Ok(())
@@ -62,7 +62,11 @@ async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Run
         // We can use one thread but interleave tasks while we're here to guarantee delivery to members
         // tokio::spawn is more expensive and requires cross-thread lifetimes ('static) but only necessary if we need parallelism.
         tokio::join!(async move {
-            runtime_for_peer.call_async(i, r.body.raw());
+            if runtime_for_peer.rpc(i, r.body.raw()).await.is_err() {
+                while runtime_for_peer.rpc(i, r.body.raw()).await.is_err() {
+                    // Keep trying until network partition is resumed.
+                }
+            }
         });
     }
 
