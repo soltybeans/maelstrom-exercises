@@ -3,15 +3,17 @@ use async_trait::async_trait;
 use maelstrom::protocol::{Message, MessageBody};
 use maelstrom::{done, Node, Result, Runtime};
 use std::sync::Arc;
+use async_recursion::async_recursion;
 use serde_json::{Value};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 
 pub(crate) fn main() -> Result<()> {
     Runtime::init(try_main())
 }
 
 async fn try_main() -> Result<()> {
-    let handler = Arc::new(Handler { seen: Arc::new(Mutex::new(Vec::new())) });
+    let handler = Arc::new(Handler { seen: Arc::new(Mutex::new(Vec::new())), neighbours: Arc::new(Mutex::new(Vec::new())) });
     Runtime::new().with_handler(handler).run().await.unwrap();
 
     Ok(())
@@ -20,14 +22,22 @@ async fn try_main() -> Result<()> {
 #[derive(Clone)]
 struct Handler {
     seen: Arc<Mutex<Vec<Value>>>,
+    neighbours: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
 impl Node for Handler {
     async fn process(&self, runtime: Runtime, req: Message) -> Result<()> {
         match req.get_type() {
+            "init" => {
+                for i in runtime.neighbours() {
+                    self.neighbours.lock().await.push(i.to_string());
+                }
+                Ok(())
+            }
             "broadcast" => {
-                process_broadcast_message(&self, req, runtime).await.unwrap();
+                let runtime = Arc::new(runtime);
+                process_broadcast_message(&self, req, Arc::clone(&runtime)).await.unwrap();
                 Ok(())
             }
             "read" => {
@@ -43,35 +53,45 @@ impl Node for Handler {
     }
 }
 
-async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Runtime) -> Result<()> {
+async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Arc<Runtime>) -> Result<()> {
     let msg = req.body.extra.get("message").unwrap().as_number().unwrap().to_owned();
     handler.seen.lock().await.push(Value::from(msg));
 
-    let runtime = Arc::new(runtime);
-    // Works because of smart pointers.
-    let iter_neighbours = runtime.neighbours();
+    let mut neighbours;
+    neighbours = handler.neighbours.lock().await.to_vec();
 
     // Copy the request once
     let request_for_reply: Message = Message { src: req.src.clone(), dest: req.dest.clone(), body: req.body.clone() };
     let req2 = Arc::new(req);
+    let result = runtime.reply(request_for_reply, MessageBody::new().and_msg_id(req2.body.msg_id).with_type("broadcast_ok")).await;
 
-    for i in iter_neighbours {
-        let r = Arc::clone(&req2);
-
+    let mut set = JoinSet::new();
+    for i in neighbours {
+        let message = Arc::clone(&req2);
         let runtime_for_peer = Arc::clone(&runtime);
-        // We can use one thread but interleave tasks while we're here to guarantee delivery to members
-        // tokio::spawn is more expensive and requires cross-thread lifetimes ('static) but only necessary if we need parallelism.
-        tokio::join!(async move {
-            if runtime_for_peer.rpc(i, r.body.raw()).await.is_err() {
-                while runtime_for_peer.rpc(i, r.body.raw()).await.is_err() {
-                    // Keep trying until network partition is resumed.
-                }
+        let i_copy = Arc::new(i);
+        let neighbour = Arc::clone(&i_copy);
+
+        set.spawn(async move {
+            if runtime_for_peer.rpc(i_copy.to_string(), message.body.raw()).await.is_err() {
+                keep_calling(runtime_for_peer, neighbour, message).await
             }
         });
     }
+    while let Some(res) = set.join_next().await {
+        // Do nothing.
+        res.unwrap()
+    }
 
-    //reply takes over ownership of the request....
-    runtime.reply(request_for_reply, MessageBody::new().and_msg_id(req2.body.msg_id).with_type("broadcast_ok")).await
+    result
+}
+
+#[async_recursion]
+async fn keep_calling(runtime_for_peer: Arc<Runtime>, i: Arc<String>, r: Arc<Message>) {
+    while runtime_for_peer.rpc(Arc::clone(&i).to_string(), r.body.raw()).await.is_err() {
+        // Keep trying until network partition is resumed.
+        let _ = keep_calling(Arc::clone(&runtime_for_peer), Arc::clone(&i), Arc::clone(&r)).await;
+    }
 }
 
 async fn process_read_message(handler: &Handler, req: Message, runtime: Runtime) -> Result<()> {

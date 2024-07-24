@@ -1,5 +1,5 @@
 [package]
-name = "maelstrom-broadcast-3c"
+name = "maelstrom-broadcast-3d"
 version = "0.1.0"
 edition = "2021"
 
@@ -11,3 +11,4 @@ serde = { version = "1.0.204", features = ["derive"] }
 crossbeam-channel = "0.5.13"
 crossbeam-utils = "0.8.20"
 tokio = "1.38.0"
+async-recursion = "1.1.1"
