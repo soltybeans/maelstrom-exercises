@@ -1,4 +1,5 @@
-// cargo build && ~/maelstrom.tar/maelstrom/maelstrom test -w broadcast --bin ./target/debug/maelstrom-broadcast-3d --node-count 1 --time-limit 20 --rate 10 --nemesis partition
+use std::ops::Deref;
+// cargo build && ~/maelstrom.tar/maelstrom/maelstrom test -w broadcast --bin ./target/debug/maelstrom-broadcast-3d --node-count 5 --time-limit 20 --rate 10 --nemesis partition
 use async_trait::async_trait;
 use maelstrom::protocol::{Message, MessageBody};
 use maelstrom::{done, Node, Result, Runtime};
@@ -7,6 +8,7 @@ use async_recursion::async_recursion;
 use serde_json::{Value};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use rand::random;
 
 pub(crate) fn main() -> Result<()> {
     Runtime::init(try_main())
@@ -91,7 +93,7 @@ async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Arc
             let i_copy = Arc::new(i);
             let neighbour = Arc::clone(&i_copy);
 
-            // A backlog lasts as long as its handler.
+            // A backlog lasts as long as its handler. But spawn and these background tasks for peers.
             handler.backlog.lock().await.spawn(async move {
                 keep_calling_neighbour(runtime_for_peer, neighbour, message).await;
             });
@@ -134,16 +136,18 @@ async fn keep_calling_neighbour(runtime_for_peer: Arc<Runtime>, i: Arc<String>, 
     // A partition may occur either as a dropped message or a delayed one. We need to handle both.
     let rpc_result = runtime_for_peer.rpc(Arc::clone(&i).to_string(), r.body.raw()).await;
     if rpc_result.is_ok() {
-        let m = rpc_result.unwrap().await;
-        if m.is_ok() && m.unwrap().get_type() == "broadcast_ok" {
+        let result_message = rpc_result.unwrap().await.unwrap().body;
+        // This check is not valid.
+        if result_message.typ == String::from("broadcast_ok") {
             return;
         } else {
+            // give some time for the partition to heal
+            //tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             keep_calling_neighbour(Arc::clone(&runtime_for_peer), Arc::clone(&i), Arc::clone(&r)).await;
         }
     } else {
-        // give some time for the partition to heal
-        //tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        keep_calling_neighbour(Arc::clone(&runtime_for_peer), Arc::clone(&i), Arc::clone(&r)).await;
+        panic!("broadcast NOT ok!");
+        //keep_calling_neighbour(Arc::clone(&runtime_for_peer), Arc::clone(&i), Arc::clone(&r)).await;
     }
 }
 
