@@ -1,11 +1,12 @@
-use std::fmt::Error;
 // cargo build && ~/maelstrom.tar/maelstrom/maelstrom test -w broadcast --bin ./target/debug/maelstrom-broadcast-3d --node-count 5 --time-limit 20 --rate 10 --nemesis partition
 use async_trait::async_trait;
 use maelstrom::protocol::{Message, MessageBody};
-use maelstrom::{done, Node, Result, RPCResult, Runtime};
+use maelstrom::{done, Node, Result, Runtime};
 use std::sync::Arc;
+use std::time::Duration;
 use serde_json::{Value};
 use tokio::sync::Mutex;
+use tokio_context::context::Context;
 use tokio::task::JoinSet;
 
 pub(crate) fn main() -> Result<()> {
@@ -53,6 +54,10 @@ impl Node for Handler {
                 process_topology_message(req, runtime).await.unwrap();
                 Ok(())
             }
+            "error" => {
+                let error = req.body.extra.get("error").unwrap().as_str().unwrap();
+                panic!("Error from client simulating dist failure!:{}", error);
+            }
             _ => return done(runtime, req)
         }
     }
@@ -61,6 +66,10 @@ impl Node for Handler {
 async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Arc<Runtime>) -> Result<()> {
     let msg = req.body.extra.get("message").unwrap().as_number().unwrap().to_owned();
     {
+        // We read before writing to prevent "zombie" messages from duplicating and flooding our store.
+        if handler.seen.lock().await.contains(&Value::from(msg.clone())) {
+            return Ok(());
+        }
         handler.seen.lock().await.push(Value::from(msg.clone()));
     }
     let msg_id = req.body.msg_id;
@@ -81,22 +90,22 @@ async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Arc
                 .with_type("broadcast")
                 .and_msg_id(msg_id);
             message_body.extra.insert(String::from("message"), Value::from(msg.clone()));
-            let message = Arc::new(Message {
+            let message = Message {
                 src: req.clone().dest,
                 dest: i.clone(),
                 body: message_body,
-            });
+            };
 
             let runtime_for_peer = Arc::clone(&runtime);
             let i_copy = Arc::new(i);
-            let neighbour = Arc::clone(&i_copy);
 
             // A backlog lasts as long as its handler. But spawn and these background tasks for peers.
+            let msg_clone = message.clone();
             handler.backlog.lock().await.spawn(async move {
-                let is_message_error = runtime_for_peer.rpc(Arc::clone(&i_copy).to_string(), message.body.raw()).await.unwrap().await.unwrap().body.is_error();
-                if is_message_error {
-                    retry_peer_calls(runtime_for_peer, neighbour, message, is_message_error).await;
-                }
+                let (context, _) = Context::with_timeout(Duration::from_millis(100000));
+                let req_clone2 = msg_clone.clone();
+                let m = runtime_for_peer.call(context, Arc::clone(&i_copy).to_string(), req_clone2.clone().body).await;
+                retry_peer_calls(Arc::clone(&runtime_for_peer), Arc::clone(&i_copy), req_clone2.body, m.is_err()).await;
             });
         }
     }
@@ -105,6 +114,7 @@ async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Arc
         sync_messages_with_peers(handler, is_client),
         reply_to_client(Arc::clone(&runtime), request_for_reply, req.clone())
     );
+
     client_result
 }
 
@@ -120,18 +130,21 @@ async fn sync_messages_with_peers(handler: &Handler, is_client: bool) -> Result<
     if !is_client {
         return Ok(());
     }
-    while let Some(_res) = handler.backlog.lock().await.join_next().await {
-        // Do nothing. Just collect results
+    while !handler.backlog.lock().await.is_empty() {
+        // Drain the backlog for a particular message
     }
     Ok(())
 }
 
-async fn retry_peer_calls(runtime_for_peer: Arc<Runtime>, i: Arc<String>, r: Arc<Message>, mut is_message_error: bool) {
+async fn retry_peer_calls(runtime_for_peer: Arc<Runtime>, i: Arc<String>, r: MessageBody, mut is_message_error: bool) {
     while is_message_error {
-        is_message_error = runtime_for_peer.rpc(Arc::clone(&i).to_string(), r.body.raw())
-            .await.unwrap() // RPCResult
-            .await.is_err() // Message
-        // keep calling
+        let req_clone = r.clone();
+        let (context, _) = Context::with_timeout(Duration::from_millis(10));
+        let m = runtime_for_peer.call(context, Arc::clone(&i).to_string(), req_clone).await;
+        match m {
+            Ok(_) => is_message_error = false,
+            Err(_e) => is_message_error = true
+        }
     }
 }
 
