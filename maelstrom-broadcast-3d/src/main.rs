@@ -1,7 +1,8 @@
+use std::fmt::Error;
 // cargo build && ~/maelstrom.tar/maelstrom/maelstrom test -w broadcast --bin ./target/debug/maelstrom-broadcast-3d --node-count 5 --time-limit 20 --rate 10 --nemesis partition
 use async_trait::async_trait;
 use maelstrom::protocol::{Message, MessageBody};
-use maelstrom::{done, Node, Result, Runtime};
+use maelstrom::{done, Node, Result, RPCResult, Runtime};
 use std::sync::Arc;
 use serde_json::{Value};
 use tokio::sync::Mutex;
@@ -92,24 +93,19 @@ async fn process_broadcast_message(handler: &Handler, req: Message, runtime: Arc
 
             // A backlog lasts as long as its handler. But spawn and these background tasks for peers.
             handler.backlog.lock().await.spawn(async move {
-                let is_message_error = runtime_for_peer.rpc(Arc::clone(&i_copy).to_string(), message.body.raw())
-                    .await.unwrap()  //RPCResult
-                    .await.is_err(); // Message
-                retry_peer_calls(runtime_for_peer, neighbour, message, is_message_error).await;
+                let is_message_error = runtime_for_peer.rpc(Arc::clone(&i_copy).to_string(), message.body.raw()).await.unwrap().await.unwrap().body.is_error();
+                if is_message_error {
+                    retry_peer_calls(runtime_for_peer, neighbour, message, is_message_error).await;
+                }
             });
         }
     }
 
-    if !is_client {
-        let _ = tokio::join!(
-          sync_messages_with_peers(handler, is_client),
-        );
-    }
-
-    let client_result = tokio::join!(
+    let (_, client_result) = tokio::join!(
+        sync_messages_with_peers(handler, is_client),
         reply_to_client(Arc::clone(&runtime), request_for_reply, req.clone())
     );
-    client_result.0
+    client_result
 }
 
 async fn reply_to_client(runtime: Arc<Runtime>, message: Message, req: Message) -> Result<()> {
@@ -120,6 +116,7 @@ async fn reply_to_client(runtime: Arc<Runtime>, message: Message, req: Message) 
 }
 
 async fn sync_messages_with_peers(handler: &Handler, is_client: bool) -> Result<()> {
+    // No need to wait for sync if this is a peer update
     if !is_client {
         return Ok(());
     }
